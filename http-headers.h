@@ -84,7 +84,7 @@ public:
   /**
    * @brief Find value for the `key' http header
    *
-   * If header doesn't exist, it the method will return a blank line
+   * If header doesn't exist, the method will return a blank line
    */
   std::string
   FindHeader (const std::string &key);

@@ -13,8 +13,8 @@ def configure (env):
     env.check(function_name='stpncpy', header_name='string.h', mandatory=False)
 
 # comment out the following two lines if compiling not on lnxsrv
-#    env.options.boost_includes = '/u/cs/grad/yingdi/boost/include'
-#    env.options.boost_libs     = '/u/cs/grad/yingdi/boost/lib'
+    env.options.boost_includes = '/usr/include/'
+    env.options.boost_libs     = '/usr/lib'
 #
 
     env.check_boost(lib='system thread')
