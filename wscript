@@ -14,12 +14,12 @@ def configure (env):
 
 # comment out the following two lines if compiling not on lnxsrv
     env.options.boost_includes = '/usr/include/'
-    env.options.boost_libs     = '/usr/lib'
+    env.options.boost_libs     = '/usr/lib/'
 #
 
     env.check_boost(lib='system thread')
     env.add_supported_cxxflags (cxxflags = ['-O0', '-g3', '-Wall', 
-                                            '-Wno-unused-local-typedefs', '-Wno-unused-private-field', 
+                                            '-Wno-unused-local-typedefs', '-Wno-unused-private-field',  
                                             '-fcolor-diagnostics', '-Qunused-arguments', 
                                             '-Werror'])
 
