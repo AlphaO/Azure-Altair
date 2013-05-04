@@ -10,16 +10,19 @@
 #include "http-response.h"
 #include <map>
 #include <ctime>
-#include <pthread.h>
+#include <boost/thread.hpp>
 
 using namespace std;
 
 #define MAX_THREADS 10
 #define MAX_CONNECTIONS 100
-#define PROXY_PORT "14806"
+#define PROXY_PORT "14805"
 #define BACKLOG 10
 #define BUF_SIZE 100000
 
+boost::mutex thread_count_lock;
+boost::condition_variable thread_count_cond_var;
+boost::mutex connection_count_lock;
 int thread_count = 0;
 int connection_count = 0;
 
@@ -27,27 +30,31 @@ class CachedPage
 {
 public:
   CachedPage(const char* page_data, string url, HttpResponse* response, int content_len) {
-    cerr << "CREATING NEW CACHEDPAGE" << endl;
-    cerr << page_data << endl;
-    cerr << "ABOVE IS PAGE DATA" << endl;
+    page_lock = new boost::mutex();
     this->page_data = new char[content_len];
     memcpy(this->page_data, page_data, content_len);
-    cerr << this->page_data << endl;
-    cerr << "ABOVE IS COPIED DATA with length " << content_len << endl;
     length = content_len;
     page_url = url;
     this->response = *response;
   }
 
   ~CachedPage() {
+    boost::mutex::scoped_lock lock(*page_lock);
   };
 
   void delete_data() {
-    delete [] page_data;
+    {
+      boost::mutex::scoped_lock lock(*page_lock);
+      delete [] page_data;
+    }
   }
 
   int expired() {
-    string expires = response.FindHeader("Expires");
+    string expires;
+    {
+      boost::mutex::scoped_lock lock(*page_lock);
+      expires = response.FindHeader("Expires");
+    }
     struct tm tm;
     time_t t;
     time_t now;
@@ -55,37 +62,31 @@ public:
     t = mktime(&tm);
     now = time(0);
     now = mktime(gmtime(&now));
-    cerr << "NOW IS " << asctime(gmtime(&now)) << endl;
-    cerr << "EXPIRES IS " << asctime(&tm) << endl;
     if (t < (now - 3600)) {
-      cerr << "IT IS EXPIRED" << endl;
-      cerr << t << " t" << endl;
-      cerr << now - 3600 << " now" << endl;
       return 1;
     } else {
-      cerr << t << " t" << endl;
-      cerr << now - 3600 << " now" << endl;
       return 0;
     }
   }
 
   void set_expires(string expires) {
+    boost::mutex::scoped_lock lock(*page_lock);
     response.ModifyHeader("Expires", expires);
   }
 
   string get_last_modified() {
+    boost::mutex::scoped_lock lock(*page_lock);
     return response.FindHeader("Last-Modified");
   }
 
   int get_response(char* response_buf) {
-    cerr << "COPYING CACHE DATA" << endl;
-    cerr << page_data << endl;
+    boost::mutex::scoped_lock lock(*page_lock);
     response.FormatResponse(response_buf);
-    cerr << response_buf << endl;
     memcpy(response_buf + response.GetTotalLength(), page_data, length);
     return response.GetTotalLength() + length;
   }
 private:
+  boost::mutex *page_lock;
   string page_url;
   HttpResponse response;
   char* page_data;
@@ -101,11 +102,13 @@ public:
   }
 
   void add_page(const char* page_data, string url, HttpResponse* response, int content_len) {
-    cerr << "ADDING PAGE TO CACHE" << endl;
+    boost::mutex::scoped_lock lock(cache_lock);
+    response->RemoveHeader("Connection");
     cache.insert(map<string, CachedPage>::value_type(url, CachedPage(page_data, url, response, content_len)));
   }
 
   void remove_page(string URL) {
+    boost::mutex::scoped_lock lock(cache_lock);
     cache.erase(URL);
   }
 
@@ -119,6 +122,7 @@ public:
     }
   }
 private:
+  boost::mutex cache_lock;
   map<string, CachedPage> cache;
 };
 
@@ -141,48 +145,39 @@ public:
 
     int error;
     if ((error = getaddrinfo(NULL, port.c_str(), &hints, &servinfo)) != 0) {
-      fprintf(stderr, "Error during getaddrinfo for listen socket: %s\n", gai_strerror(error));
       exit(1);
     }
 
     for (p = servinfo; p != NULL; p = p->ai_next) {
       // try to open socket
       if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-        fprintf(stderr, "Error opening listen socket\n");
         continue;
       }
-      fprintf(stderr, "opened listen socket\n");
 
       // use socket even if it is in use
       if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-          fprintf(stderr, "Error with setsockopt for listen socket\n");
           exit(1);
       }
 
       // bind address and port to socket
       if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
           close(sockfd);
-          fprintf(stderr, "Error binding with listen socket\n");
           continue;
       }
-      fprintf(stderr, "binded to listen socket\n");
 
       break;  // break out of loop if everything is successful
     }
 
     if (p == NULL)  {
-      fprintf(stderr, "Failure to create and bind socket\n");
       exit(1);
     }
 
     freeaddrinfo(servinfo);
 
     if (listen(sockfd, BACKLOG) == -1) {
-        fprintf(stderr, "Error trying to listen on socket");
         close(sockfd);
         exit(1);
     }
-    fprintf(stderr, "started listening on listen socket\n");
   }
 
   void stop_listening() {
@@ -192,7 +187,6 @@ public:
   int accept_connection() {
     struct sockaddr_storage client_addr;
     socklen_t client_addr_size = sizeof(client_addr);
-    fprintf(stderr, "waiting to accept connection\n");
     return accept(sockfd, (struct sockaddr*) &client_addr, &client_addr_size);
   }
 
@@ -209,13 +203,11 @@ public:
   ~ClientConnection() {}
 
   int receive(char* buf, size_t size, int flags) {
-    cerr << "Waiting for request from client" << endl;
     return recv(sockfd, buf, size, flags);
   }
 
   void send_response(char* response_buf, int response_len, int flags) {
     send(sockfd, response_buf, response_len, flags);
-    cerr << "Sent response back to client:" << endl << response_buf << endl;
   }
 
   void close_socket() {
@@ -230,7 +222,6 @@ class RemoteConnection
 {
 public:
   RemoteConnection(HttpRequest* request) {
-    cerr << "Setting up remote connection..." << endl;
     struct addrinfo hints, *servinfo, *p;
     int error;
     int yes = 1;
@@ -242,33 +233,26 @@ public:
     char request_port[6];
     snprintf(request_port, 6, "%hu", request->GetPort());
 
-    cerr <<  "Host is " << request->GetHost() << ":" << request_port << endl;
     if ((error = getaddrinfo(request->GetHost().c_str(), request_port, &hints, &servinfo)) != 0) {
-      cerr << "Error during getaddrinfo for server socket: " << gai_strerror(error) << endl;
       exit(1);
     }
 
     for (p = servinfo; p != NULL; p = p->ai_next) {
       // try to open socket
       if ((sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
-        cerr << "Error opening server socket" << endl;
         continue;
       }
-      cerr <<  "opened server socket" << endl;
 
       // use socket even if it is in use
       if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) == -1) {
-          cerr << "Error with setsockopt for server socket" << endl;
           exit(1);
       }
 
       // bind address and port to socket
       if (connect(sockfd, p->ai_addr, p->ai_addrlen) == -1) {
           close(sockfd);
-          cerr << "Error connecting with server socket" << endl;
           continue;
       }
-      cerr << "connected to server socket" << endl;
       break;  // break out of loop if everything is successful
     }
   }
@@ -283,7 +267,6 @@ public:
     char end_str[] = "\r\n\r\n";
     request->AddHeader("If-Modified-Since", cached_page->get_last_modified());
     int req_len = request->GetTotalLength();
-    cerr << "WITH MOD" << endl;
     int header_len = 0;
     int payload_received = 0;
     int response_len;
@@ -292,16 +275,13 @@ public:
 
     string URL = host + request->GetPath();
     request->FormatRequest(request_buf);
-    cerr << request_buf << endl;
     send(sockfd, request_buf, req_len, 0);
     memset(response_buf, 0, BUF_SIZE);
     while (!strstr(response_buf, end_str)) {
       header_len += recv(sockfd, response_buf + header_len, BUF_SIZE - header_len, 0);
     }
     payload_received = strlen(response.ParseResponse(response_buf, header_len));
-    cerr << "STATUS CODE IS: " << response.GetStatusCode() << endl;
     if (response.GetStatusCode() == "304") {
-      cerr << "NOT MODIFIED, UPDATING EXPIRES" << endl;
       cached_page->set_expires(response.FindHeader("Expires"));
       return 0;
     } else {
@@ -309,23 +289,18 @@ public:
       int close_connection = (response.FindHeader("Connection") == "close");
       header_len -= payload_received;
 
-      cerr << "Content length is: " << content_len << ". Close connection is " << close_connection << endl;
       while(close_connection || (payload_received < content_len)) {
         response_len = recv(sockfd, response_buf + header_len + payload_received, BUF_SIZE - header_len - payload_received, 0);
         payload_received += response_len;
-        cerr << "Received " << payload_received << " so far" << endl;
         if (close_connection && response_len == 0) {
           break;
         }
       }
 
       if (close_connection) {
-        cerr << "Remote host wants to close connection!" << endl;
         close(sockfd);
-        cerr << "Closed connection with remote host" << endl;
       }
       
-      cerr << "Received response from server of size " << header_len + payload_received << endl;
       return header_len + payload_received;
     }
   }
@@ -341,39 +316,30 @@ public:
     char request_buf[req_len];
 
     string URL = host + request->GetPath();
-    cerr << "The requested URL is " << URL << endl;
 
     request->FormatRequest(request_buf);
-    cerr << "Formatted request to be send to server" << endl << request_buf << endl;
     send(sockfd, request_buf, req_len, 0);
-    cerr << "Sent request to server" << endl << request_buf << endl;
     memset(response_buf, 0, BUF_SIZE);
     while (!strstr(response_buf, end_str)) {
       header_len += recv(sockfd, response_buf + header_len, BUF_SIZE - header_len, 0);
     }
-    cerr << "Received response from server" << endl << response_buf << endl;
     payload_received = strlen(response.ParseResponse(response_buf, header_len));
     content_len = atoi(response.FindHeader("Content-Length").c_str());
     int close_connection = (response.FindHeader("Connection") == "close");
     header_len -= payload_received;
 
-    cerr << "Content length is: " << content_len << ". Close connection is " << close_connection << endl;
     while(close_connection || (payload_received < content_len)) {
       response_len = recv(sockfd, response_buf + header_len + payload_received, BUF_SIZE - header_len - payload_received, 0);
       payload_received += response_len;
-      cerr << "Received " << payload_received << " so far" << endl;
       if (close_connection && response_len == 0) {
         break;
       }
     }
 
     if (close_connection) {
-      cerr << "Remote host wants to close connection!" << endl;
       close(sockfd);
-      cerr << "Closed connection with remote host" << endl;
     }
     
-    cerr << "Received response from server of size " << header_len + payload_received << endl;
     return header_len + payload_received;
   }
 
@@ -394,19 +360,26 @@ void serve_request(int client_socket)
   int response_len;
 
   while (1) {
+    req_len = 0;
+    int curr_len = 1;
     memset(request_buf, 0, BUF_SIZE);
     memset(response_buf, 0, BUF_SIZE);
     if ((req_len = client_connection.receive(request_buf, BUF_SIZE, 0)) == 0) {
-      fprintf(stderr, "Client closed socket\n");
       break;
     }
-    fprintf(stderr, "Received request:\n%s\n\n", request_buf);
+    while (!strstr(request_buf, "\r\n\r\n") && curr_len) {
+      curr_len = client_connection.receive(request_buf - req_len, BUF_SIZE - req_len, 0);
+      req_len += curr_len;
+    }
+
+    if (req_len == 0) {
+      break;
+    }
+
 
     try {
       request.ParseRequest(request_buf, req_len);
-      fprintf(stderr, "Parsed request\n");
     } catch (ParseException e) {
-      fprintf(stderr, "Exception attempting to parse: %s\n", e.what());
       return;
     }
 
@@ -418,36 +391,41 @@ void serve_request(int client_socket)
     CachedPage* cached_page;
 
     if (!(cached_page = proxy_cache.find_page(URL))) {
-      cerr << "PAGE NOT FOUND IN CACHE!" << endl;
       iter = server_map.find(host);
       if (iter == server_map.end()) {
-        cerr << "Inserting " << host << " into server_map" << endl;
+        {
+          boost::mutex::scoped_lock lock(connection_count_lock);
+          if (connection_count >= 100) {
+            continue;
+          } else {
+            connection_count++;
+          }
+        }
         iter = server_map.insert(map<string, RemoteConnection>::value_type(host, RemoteConnection(&request))).first;
-      } else {
-        cerr << "Connection found in server map" << endl;
       }
 
-      cerr << "Host is " << host << " and path is " << request.GetPath() << endl;
       response_len = iter->second.send_request(&request, response_buf, host);
-      cerr << "content length is " << response.FindHeader("Content-Length") << endl;
       const char* page_data = response.ParseResponse(response_buf, response_len);
       proxy_cache.add_page(page_data, URL, &response, atoi(response.FindHeader("Content-Length").c_str()));
       if (response.FindHeader("Connection") == "close") {
         server_map.erase(iter);
-        connection_count--;
+        {
+          boost::mutex::scoped_lock lock(connection_count_lock);
+          connection_count--;
+        }
       }
     } else {
       response_len = cached_page->get_response(response_buf);
       if (cached_page->expired()) {
-        cerr << "PAGE EXPIRED!!" << endl;
         iter = server_map.find(host);
         if (iter == server_map.end()) {
-          cerr << "Inserting " << host << " into server_map" << endl;
           iter = server_map.insert(map<string, RemoteConnection>::value_type(host, RemoteConnection(&request))).first;
+          {
+            boost::mutex::scoped_lock lock(connection_count_lock);
+            connection_count++;
+          } 
         } else {
-          cerr << "Connection found in server map" << endl;
         }
-        cerr << "Host is " << host << " and path is " << request.GetPath() << endl;
         response_len = iter->second.update_request(&request, response_buf, host, cached_page);
         if (response_len) {
           const char* page_data = response.ParseResponse(response_buf, response_len);
@@ -458,8 +436,6 @@ void serve_request(int client_socket)
           response_len = cached_page->get_response(response_buf);
         }
       }
-      cerr << "PAGE FOUND IN CACHE!" << endl;
-      cerr << response_buf << endl << endl;
     }
     client_connection.send_response(response_buf, response_len, 0);
   }
@@ -467,28 +443,39 @@ void serve_request(int client_socket)
   for (iter = server_map.begin(); iter != server_map.end(); ++iter) {
     iter->second.close_socket();
   }
+  {
+    boost::mutex::scoped_lock lock(connection_count_lock);
+    connection_count -= server_map.size();
+  }
   server_map.clear();
 
-  fprintf(stderr, "Closing connection with client\n");
   client_connection.close_socket();
+  {
+    boost::mutex::scoped_lock lock(thread_count_lock);
+    thread_count--;
+    thread_count_cond_var.notify_all();
+  }
   return;
 }
 
 int main (int argc, char *argv[])
 {
-  proxy_cache = WebCache();
   Proxy proxy = Proxy();
   proxy.start_listening(PROXY_PORT);
   int client_socket;  // socket that clients connect to
 
   while (1) {
-    client_socket = proxy.accept_connection();
-    cerr << "Accepted connection" << endl;
-    serve_request(client_socket);
+    {
+      boost::mutex::scoped_lock lock(thread_count_lock);
+      while (thread_count >= 10)
+        thread_count_cond_var.wait(lock);
+      client_socket = proxy.accept_connection();
+      thread_count++;
+    }
+    boost::thread(serve_request, client_socket);
   }
   
   // Should never reach this
   proxy.stop_listening();
-  cerr << "Exiting" << endl;
   return 0;
 }

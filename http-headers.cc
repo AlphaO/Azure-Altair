@@ -9,6 +9,7 @@
 
 #include <string> // C++ STL string
 #include <string.h> // helpers to copy C-style strings
+#include <boost/algorithm/string.hpp>
 
 #include "compat.h"
 
@@ -129,13 +130,17 @@ HttpHeaders::FormatHeaders (char *buffer) const
 void
 HttpHeaders::AddHeader (const std::string &key, const std::string &value)
 {
-  m_headers.push_back (HttpHeader (key, value));
+  string lower_key = key;
+  boost::algorithm::to_lower(lower_key);
+  m_headers.push_back (HttpHeader (lower_key, value));
 }
 
 void
 HttpHeaders::RemoveHeader (const std::string &key)
 {
-  std::list<HttpHeader>::iterator item = std::find (m_headers.begin (), m_headers.end (), key);
+  string lower_key = key;
+  boost::algorithm::to_lower(lower_key);
+  std::list<HttpHeader>::iterator item = std::find (m_headers.begin (), m_headers.end (), lower_key);
   if (item != m_headers.end ())
     m_headers.erase (item);
 }
@@ -143,17 +148,21 @@ HttpHeaders::RemoveHeader (const std::string &key)
 void
 HttpHeaders::ModifyHeader (const std::string &key, const std::string &value)
 {
-  std::list<HttpHeader>::iterator item = std::find (m_headers.begin (), m_headers.end (), key);
+  string lower_key = key;
+  boost::algorithm::to_lower(lower_key);
+  std::list<HttpHeader>::iterator item = std::find (m_headers.begin (), m_headers.end (), lower_key);
   if (item != m_headers.end ())
     item->m_value = value;
   else
-    AddHeader (key, value);
+    AddHeader (lower_key, value);
 }
 
 std::string
 HttpHeaders::FindHeader (const std::string &key)
 {
-  std::list<HttpHeader>::iterator item = std::find (m_headers.begin (), m_headers.end (), key);
+  string lower_key = key;
+  boost::algorithm::to_lower(lower_key);
+  std::list<HttpHeader>::iterator item = std::find (m_headers.begin (), m_headers.end (), lower_key);
   if (item != m_headers.end ())
     return item->m_value;
   else
