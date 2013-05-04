@@ -56,13 +56,19 @@ public:
       expires = response.FindHeader("Expires");
     }
     struct tm tm;
+    struct tm *dst;
     time_t t;
     time_t now;
     strptime(expires.c_str(), "%a, %d %b %Y %H:%M:%S %Z", &tm);
     t = mktime(&tm);
     now = time(0);
-    now = mktime(gmtime(&now));
-    if (t < (now - 3600)) {
+    dst = gmtime(&now);
+    dst->tm_isdst = 1;
+    now = mktime(dst);
+
+    cerr << now << " now" << endl;
+    cerr << t << " expires" << endl;
+    if (t < now) {
       return 1;
     } else {
       return 0;
